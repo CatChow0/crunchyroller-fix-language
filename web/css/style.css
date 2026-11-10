@@ -1591,7 +1591,8 @@ hr.div {
 }
 
 .task-ep-row.status-failed,
-.task-ep-row.status-canceled {
+.task-ep-row.status-canceled,
+.task-ep-row.status-skipped {
   opacity: 0.75;
 }
 
@@ -1641,6 +1642,7 @@ hr.div {
 .ep-ico-paused { color: #aaa; }
 .ep-ico-queued { color: var(--dim); }
 .ep-ico-err { color: #888; }
+.ep-ico-skip { color: #c9a45c; }
 
 .task-ep-right {
   display: flex;
@@ -1684,6 +1686,13 @@ hr.div {
   color: #888;
   background: rgba(255, 255, 255, 0.04);
   border-color: rgba(255, 255, 255, 0.08);
+}
+
+.task-ep-status-pill.status-skipped {
+  color: #c9a45c;
+  background: rgba(201, 164, 92, 0.08);
+  border-color: rgba(201, 164, 92, 0.25);
+  cursor: help;
 }
 
 .task-ep-prog {

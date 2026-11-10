@@ -93,6 +93,28 @@ Crunchyroller uses its built-in Python downloader by default, but also supports 
 
 ---
 
+## Missing Dub Audio
+
+When a selected audio language is not available for an episode, Crunchyroller follows the **missing audio policy**:
+
+| Policy | No selected language available | Some selected languages missing |
+|---|---|---|
+| `skip_if_none` (default) | episode is skipped | downloaded with the tracks found (warning logged) |
+| `skip_if_any` | episode is skipped | episode is skipped |
+| `fallback` | first available track is downloaded (usually Japanese) | downloaded with the tracks found (warning logged) |
+
+Selecting "All available" audio is never affected.
+
+Set it with any of:
+
+1. The "when the selected dub is missing" option in the GUI settings (applies to episodes queued afterwards).
+2. `"missing_audio_policy"` in `config.json`.
+3. `--missing-audio {skip-if-none,skip-if-any,fallback}` on the command line (this run only, not saved).
+
+Skipped episodes show a `skipped` status in the download queue and history (hover to see which language was missing), and are reported in the Discord bot batch summary.
+
+---
+
 ## Logs & Troubleshooting
 
 Logs are stored locally with tokens and sensitive credentials automatically redacted:

@@ -16,7 +16,7 @@ import uuid
 logger = logging.getLogger("crunchyroll.queue")
 
 from .api import get_episode_info, purge_orphan_streams
-from .downloader import download_episode
+from .downloader import AudioUnavailableError, download_episode, normalize_missing_audio_policy
 from .http_client import CrunchyrollHttpClient
 from .session_pool import ConcurrencyConfig
 from .state_store import PersistedState, StateStore
@@ -41,7 +41,8 @@ class QueueItem:
     enable_hedging: bool = False
     enable_resume: bool = True
     bitrate_mode: str = "highest"
-    status: str = "queued"  # queued | running | paused | completed | failed | canceled | interrupted
+    missing_audio_policy: str = "skip_if_none"  # skip_if_none | skip_if_any | fallback
+    status: str = "queued"  # queued | running | paused | completed | failed | canceled | interrupted | skipped
     error: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     started_at: Optional[float] = None
@@ -80,6 +81,7 @@ class QueueItem:
             "enable_hedging": self.enable_hedging,
             "enable_resume": self.enable_resume,
             "bitrate_mode": self.bitrate_mode,
+            "missing_audio_policy": self.missing_audio_policy,
             "status": self.status,
             "error": self.error,
             "created_at": self.created_at,
@@ -110,6 +112,7 @@ class QueueItem:
             enable_hedging=bool(d.get("enable_hedging", False)),
             enable_resume=bool(d.get("enable_resume", True)),
             bitrate_mode=str(d.get("bitrate_mode", "highest")),
+            missing_audio_policy=normalize_missing_audio_policy(d.get("missing_audio_policy")),
             status=str(d.get("status", "queued")),
             error=d.get("error"),
             created_at=float(d.get("created_at", time.time())),
@@ -129,7 +132,7 @@ class DownloadTask:
     audio_quality: str = "192k"
     audio_langs: List[str] = field(default_factory=lambda: ["ja-JP"])
     subs_langs: List[str] = field(default_factory=lambda: ["en-US"])
-    status: str = "queued"  # queued | running | paused | completed | canceled | failed | interrupted
+    status: str = "queued"  # queued | running | paused | completed | canceled | failed | interrupted | skipped
     item_ids: List[str] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
 
@@ -166,11 +169,12 @@ class DownloadTask:
         active_job_id: Optional[str] = None,
     ) -> str:
         task_items = [items_map[iid] for iid in self.item_ids if iid in items_map]
-        active_items = [it for it in task_items if it.status != "canceled"]
+        active_items = [it for it in task_items if it.status not in ("canceled", "skipped")]
         total = len(active_items)
         completed = sum(1 for it in active_items if it.status == "completed")
         failed = sum(1 for it in active_items if it.status == "failed")
         canceled = sum(1 for it in task_items if it.status == "canceled")
+        skipped = sum(1 for it in task_items if it.status == "skipped")
         is_active = any(it.id == active_job_id for it in active_items)
 
         if self.status == "canceled":
@@ -181,6 +185,9 @@ class DownloadTask:
             return "completed"
         elif total == 0 and canceled > 0:
             return "canceled"
+        elif total == 0 and skipped > 0:
+            # Every episode was skipped (requested audio unavailable)
+            return "completed"
         elif completed + failed == total and total > 0:
             return "failed" if failed > 0 else "canceled"
         elif any(it.status == "paused" for it in active_items):
@@ -205,7 +212,7 @@ class DownloadTask:
         active_progress_pct: float = 0.0,
     ) -> Dict[str, Any]:
         task_items = [items_map[iid] for iid in self.item_ids if iid in items_map]
-        active_items = [it for it in task_items if it.status != "canceled"]
+        active_items = [it for it in task_items if it.status not in ("canceled", "skipped")]
         total = len(active_items)
         completed = sum(1 for it in active_items if it.status == "completed")
         failed = sum(1 for it in active_items if it.status == "failed")
@@ -305,6 +312,7 @@ class DownloadQueue:
         # Batch counts for progress tracking
         self.completed_batch_count: int = 0
         self.failed_batch_count: int = 0
+        self.skipped_batch_count: int = 0
         self.total_batch_count: int = 0
         self.last_status: str = "idle"
 
@@ -463,6 +471,9 @@ class DownloadQueue:
             enable_hedging = bool(item.get("enable_hedging", opts.get("enable_hedging", False)))
             enable_resume = bool(item.get("enable_resume", opts.get("enable_resume", True)))
             bitrate_mode = str(item.get("bitrate_mode") or opts.get("bitrate_mode") or "highest")
+            missing_audio_policy = normalize_missing_audio_policy(
+                item.get("missing_audio_policy") or opts.get("missing_audio_policy")
+            )
             season_title = str(item.get("season_title") or opts.get("season_title") or "").strip()
         else:
             ep_id = str(item).strip()
@@ -480,6 +491,7 @@ class DownloadQueue:
             enable_hedging = bool(opts.get("enable_hedging", False))
             enable_resume = bool(opts.get("enable_resume", True))
             bitrate_mode = str(opts.get("bitrate_mode") or "highest")
+            missing_audio_policy = normalize_missing_audio_policy(opts.get("missing_audio_policy"))
             season_title = str(opts.get("season_title") or "").strip()
 
         if not ep_id:
@@ -510,6 +522,7 @@ class DownloadQueue:
                 enable_hedging=enable_hedging,
                 enable_resume=enable_resume,
                 bitrate_mode=bitrate_mode,
+                missing_audio_policy=missing_audio_policy,
                 status="queued",
                 task_id=task_id or "",
                 season_title=season_title,
@@ -521,6 +534,7 @@ class DownloadQueue:
                 # Reset counters for a fresh batch
                 self.completed_batch_count = 0
                 self.failed_batch_count = 0
+                self.skipped_batch_count = 0
                 self.total_batch_count = 1
                 self.last_status = "running"
                 self.overall_pct = 0.0
@@ -991,22 +1005,30 @@ class DownloadQueue:
                         self.cancel_event.clear()
                         self.completed_batch_count = 0
                         self.failed_batch_count = 0
+                        self.skipped_batch_count = 0
                         self.total_batch_count = len(self.queue)
                         self.last_status = "running"
 
                 if not self.queue:
                     self.active_job = None
+                    skipped_note = (
+                        f", {self.skipped_batch_count} skipped" if self.skipped_batch_count > 0 else ""
+                    )
                     if self.failed_batch_count > 0 and self.completed_batch_count == 0:
                         self.last_status = "error"
-                        self.track = "error"
+                        self.track = f"error{skipped_note}"
                         self.speed = ""
                     elif self.failed_batch_count > 0 and self.completed_batch_count > 0:
                         self.last_status = "partial_error"
-                        self.track = f"{self.completed_batch_count} done, {self.failed_batch_count} failed"
+                        self.track = f"{self.completed_batch_count} done, {self.failed_batch_count} failed{skipped_note}"
                         self.speed = ""
                     elif self.completed_batch_count > 0:
                         self.last_status = "completed"
-                        self.track = "done"
+                        self.track = f"done{skipped_note}"
+                        self.speed = ""
+                    elif self.skipped_batch_count > 0:
+                        self.last_status = "completed"
+                        self.track = f"{self.skipped_batch_count} skipped"
                         self.speed = ""
                     else:
                         self.last_status = "idle"
@@ -1120,6 +1142,7 @@ class DownloadQueue:
                     download_dir=job.download_dir,
                     resume=getattr(job, "enable_resume", True),
                     bitrate_mode=getattr(job, "bitrate_mode", "highest"),
+                    missing_audio_policy=getattr(job, "missing_audio_policy", None),
                     concurrency_config=ConcurrencyConfig(
                         min_workers=1 if getattr(job, "workers", 16) <= 2 else max(2, getattr(job, "workers", 16) // 2),
                         max_workers=max(1, min(32, getattr(job, "workers", 16))),
@@ -1149,6 +1172,27 @@ class DownloadQueue:
                     self.log(f"done: {job.label} ({file_size_mb:.1f} MB)")
                 else:
                     raise RuntimeError(f"Download finished but output file missing: {output_file}")
+
+            except AudioUnavailableError as e:
+                with self.lock:
+                    job.status = "skipped"
+                    job.error = str(e)
+                    job.finished_at = time.time()
+                    self.skipped_batch_count += 1
+                    # A skipped episode no longer counts toward the batch volume
+                    self.total_batch_count = max(
+                        self.completed_batch_count + self.failed_batch_count,
+                        self.total_batch_count - 1,
+                    )
+                    tot_batch = max(1, self.total_batch_count)
+                    self.overall_pct = round((self.completed_batch_count / tot_batch) * 100, 1)
+                    self.history.append(job)
+                    if len(self.history) > self.max_history:
+                        self.history.pop(0)
+                    self._prune_all_items_map()
+                self._trigger_save()
+                logger.warning("Skipped %s: %s", job.label, e)
+                self.log(f"skipped: {job.label} - {e}")
 
             except Exception as e:
                 if self.cancel_event.is_set() or isinstance(e, InterruptedError) or self.cancel_all_flag or job.status == "canceled":

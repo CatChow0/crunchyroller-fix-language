@@ -871,6 +871,88 @@ def _prepare_media_track(
     }
 
 
+MISSING_AUDIO_POLICIES = ("skip_if_none", "skip_if_any", "fallback")
+DEFAULT_MISSING_AUDIO_POLICY = "skip_if_none"
+
+
+def normalize_missing_audio_policy(value: Any) -> str:
+    """Return a valid missing-audio policy (unknown values -> default).
+
+    Accepts dash or underscore spelling (``skip-if-none`` / ``skip_if_none``).
+    """
+    policy = str(value or "").strip().lower().replace("-", "_")
+    return policy if policy in MISSING_AUDIO_POLICIES else DEFAULT_MISSING_AUDIO_POLICY
+
+
+class AudioUnavailableError(Exception):
+    """Raised when an episode is skipped because requested audio is missing."""
+
+    def __init__(self, episode_title: str, missing: List[str], available: List[str]):
+        self.episode_title = episode_title
+        self.missing = list(missing)
+        self.available = list(available)
+        super().__init__(
+            f"requested audio {', '.join(self.missing)} not available "
+            f"(available: {', '.join(self.available) or 'none'})"
+        )
+
+
+def _resolve_dub_versions(
+    info: EpisodeInfo,
+    audio_langs: List[str],
+    policy: str,
+) -> Tuple[List[DubVersion], List[str]]:
+    """Resolve dub versions for the requested audio locales.
+
+    Returns ``(versions, missing_audio)``. Raises :class:`AudioUnavailableError`
+    when the episode must be skipped according to ``policy``:
+
+    - ``skip_if_none``: skip only when none of the requested locales exists.
+    - ``skip_if_any``: skip as soon as one requested locale is missing.
+    - ``fallback``: never skip; use the first available version if nothing matches.
+    """
+    policy = normalize_missing_audio_policy(policy)
+    candidates = list(info.episode_metadata.versions)
+    if not candidates:
+        # No version metadata: the episode itself is the only known track.
+        candidates = [
+            DubVersion(
+                guid="",
+                media_guid="",
+                season_guid="",
+                audio_locale=info.episode_metadata.audio_locale or "ja-JP",
+                locale="",
+            )
+        ]
+
+    versions_by_locale = {
+        version.audio_locale.strip().lower(): version
+        for version in candidates
+        if version.audio_locale.strip()
+    }
+    versions: List[DubVersion] = []
+    for loc in audio_langs:
+        version = versions_by_locale.get(loc.lower())
+        if version:
+            versions.append(version)
+
+    found = {version.audio_locale.lower() for version in versions}
+    missing_audio = [locale for locale in audio_langs if locale.lower() not in found]
+
+    should_skip = (
+        (policy == "skip_if_any" and missing_audio)
+        or (policy != "fallback" and not versions)
+    )
+    if should_skip:
+        available = _unique_locales([v.audio_locale for v in candidates if v.audio_locale])
+        raise AudioUnavailableError(info.title, missing_audio, available)
+
+    if not versions:
+        versions.append(candidates[0])
+
+    return versions, missing_audio
+
+
 def download_episode(
     client: CrunchyrollHttpClient,
     base_content_id: str,
@@ -889,12 +971,20 @@ def download_episode(
     download_dir: Optional[str] = None,
     resume: bool = True,
     bitrate_mode: Optional[str] = None,
+    missing_audio_policy: Optional[str] = None,
 ) -> str:
-    """download all streams for an episode and mux to mkv using shared session pooling and resume support"""
+    """download all streams for an episode and mux to mkv using shared session pooling and resume support
+
+    Raises :class:`AudioUnavailableError` when the episode is skipped because
+    the requested audio is unavailable (see ``missing_audio_policy``).
+    """
     from .auth import load_config
     cfg = load_config()
     if not bitrate_mode:
         bitrate_mode = cfg.get("bitrate_mode", "highest")
+    if missing_audio_policy is None:
+        missing_audio_policy = cfg.get("missing_audio_policy")
+    missing_audio_policy = normalize_missing_audio_policy(missing_audio_policy)
     if cfg.get("use_n_m3u8dl_re", False):
         return _download_episode_n_m3u8dl_re(
             client=client,
@@ -912,6 +1002,7 @@ def download_episode(
             pause_event=pause_event,
             cancel_event=cancel_event,
             download_dir=download_dir,
+            missing_audio_policy=missing_audio_policy,
         )
 
     audio_all = _is_all_tracks(audio_langs)
@@ -927,35 +1018,7 @@ def download_episode(
     else:
         audio_langs = _unique_locales(audio_langs)
 
-    versions: List[DubVersion] = []
-    versions_by_locale = {
-        version.audio_locale.strip().lower(): version
-        for version in info.episode_metadata.versions
-        if version.audio_locale.strip()
-    }
-    for loc in audio_langs:
-        version = versions_by_locale.get(loc.lower())
-        if version:
-            versions.append(version)
-
-    missing_audio = [
-        locale for locale in audio_langs
-        if locale.lower() not in {version.audio_locale.lower() for version in versions}
-    ]
-
-    if not versions:
-        if info.episode_metadata.versions:
-            versions.append(info.episode_metadata.versions[0])
-        else:
-            versions.append(
-                DubVersion(
-                    guid="",
-                    media_guid="",
-                    season_guid="",
-                    audio_locale=info.episode_metadata.audio_locale,
-                    locale="",
-                )
-            )
+    versions, missing_audio = _resolve_dub_versions(info, audio_langs, missing_audio_policy)
 
     active_streams: Dict[str, str] = {}
     playback_cache: Dict[str, PlaybackStream] = {}
@@ -1680,6 +1743,7 @@ def download_season(
     download_dir: Optional[str] = None,
     resume: bool = True,
     bitrate_mode: Optional[str] = None,
+    missing_audio_policy: Optional[str] = None,
 ) -> None:
     """download an entire season"""
     print(f"Found {len(episodes)} episodes in this season!\n")
@@ -1722,25 +1786,30 @@ def download_season(
             ),
             title=ep.title,
         )
-        download_episode(
-            client,
-            ep.id,
-            info,
-            audio_langs,
-            subs_langs,
-            video_quality,
-            audio_quality,
-            debug=debug,
-            progress_cb=progress_cb,
-            concurrency_config=concurrency_config,
-            force_download=force_download,
-            server_index=server_index,
-            pause_event=pause_event,
-            cancel_event=cancel_event,
-            download_dir=download_dir,
-            resume=resume,
-            bitrate_mode=bitrate_mode,
-        )
+        try:
+            download_episode(
+                client,
+                ep.id,
+                info,
+                audio_langs,
+                subs_langs,
+                video_quality,
+                audio_quality,
+                debug=debug,
+                progress_cb=progress_cb,
+                concurrency_config=concurrency_config,
+                force_download=force_download,
+                server_index=server_index,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+                download_dir=download_dir,
+                resume=resume,
+                bitrate_mode=bitrate_mode,
+                missing_audio_policy=missing_audio_policy,
+            )
+        except AudioUnavailableError as exc:
+            print(f"Skipping: {exc}")
+            logger.warning("Skipping episode %s: %s", ep.title, exc)
         print()
 
 
@@ -1762,6 +1831,7 @@ def download_series(
     download_dir: Optional[str] = None,
     resume: bool = True,
     bitrate_mode: Optional[str] = None,
+    missing_audio_policy: Optional[str] = None,
 ) -> None:
     """grab everything for a series"""
     # Catalog endpoints require concrete locales. Sending ``all`` here makes
@@ -1834,25 +1904,30 @@ def download_series(
             title=ep.title,
         )
 
-        download_episode(
-            client,
-            ep.id,
-            info,
-            audio_langs,
-            subs_langs,
-            video_quality,
-            audio_quality,
-            debug=debug,
-            progress_cb=progress_cb,
-            concurrency_config=concurrency_config,
-            force_download=force_download,
-            server_index=server_index,
-            pause_event=pause_event,
-            cancel_event=cancel_event,
-            download_dir=download_dir,
-            resume=resume,
-            bitrate_mode=bitrate_mode,
-        )
+        try:
+            download_episode(
+                client,
+                ep.id,
+                info,
+                audio_langs,
+                subs_langs,
+                video_quality,
+                audio_quality,
+                debug=debug,
+                progress_cb=progress_cb,
+                concurrency_config=concurrency_config,
+                force_download=force_download,
+                server_index=server_index,
+                pause_event=pause_event,
+                cancel_event=cancel_event,
+                download_dir=download_dir,
+                resume=resume,
+                bitrate_mode=bitrate_mode,
+                missing_audio_policy=missing_audio_policy,
+            )
+        except AudioUnavailableError as exc:
+            print(f"Skipping: {exc}")
+            logger.warning("Skipping episode %s: %s", ep.title, exc)
 
 def _get_keys_for_stream(
     client: CrunchyrollHttpClient,
@@ -1897,6 +1972,7 @@ def _download_episode_n_m3u8dl_re(
     pause_event: Optional[threading.Event] = None,
     cancel_event: Optional[threading.Event] = None,
     download_dir: Optional[str] = None,
+    missing_audio_policy: Optional[str] = None,
 ) -> str:
     """Download an episode using N_m3u8DL-RE and mux to MKV with FFmpeg.
 
@@ -1925,35 +2001,9 @@ def _download_episode_n_m3u8dl_re(
     else:
         audio_langs = _unique_locales(audio_langs)
 
-    versions_by_locale = {
-        v.audio_locale.strip().lower(): v
-        for v in info.episode_metadata.versions
-        if v.audio_locale.strip()
-    }
-    versions: List[DubVersion] = []
-    for loc in audio_langs:
-        version = versions_by_locale.get(loc.lower())
-        if version:
-            versions.append(version)
-
-    missing_audio = [
-        locale for locale in audio_langs
-        if locale.lower() not in {v.audio_locale.lower() for v in versions}
-    ]
-
-    if not versions:
-        if info.episode_metadata.versions:
-            versions.append(info.episode_metadata.versions[0])
-        else:
-            versions.append(
-                DubVersion(
-                    guid="",
-                    media_guid="",
-                    season_guid="",
-                    audio_locale=info.episode_metadata.audio_locale or "ja-JP",
-                    locale="",
-                )
-            )
+    from .auth import load_config
+    cfg = load_config()
+    versions, missing_audio = _resolve_dub_versions(info, audio_langs, missing_audio_policy)
 
     # ------------------------------------------------------------------
     # 2. Compute output file path (Plex & Jellyfin compliant)
@@ -1964,8 +2014,7 @@ def _download_episode_n_m3u8dl_re(
     ep_num = info.episode_metadata.episode_number
 
     if not download_dir:
-        from .auth import load_config
-        download_dir = load_config().get("download_dir", DEFAULT_DOWNLOAD_DIR)
+        download_dir = cfg.get("download_dir", DEFAULT_DOWNLOAD_DIR)
     if not download_dir or not download_dir.strip():
         download_dir = DEFAULT_DOWNLOAD_DIR
     base_dir = os.path.abspath(os.path.expanduser(download_dir.strip()))

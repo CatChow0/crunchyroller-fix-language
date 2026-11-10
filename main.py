@@ -44,7 +44,12 @@ sys.stderr = SafeStream(sys.stderr)
 from crunchyroll import __version__
 from crunchyroll.api import get_episode_info, get_season_episodes, get_seasons, parse_url_type
 from crunchyroll.auth import load_config, save_config
-from crunchyroll.downloader import download_episode, download_season, download_series
+from crunchyroll.downloader import (
+    AudioUnavailableError,
+    download_episode,
+    download_season,
+    download_series,
+)
 from crunchyroll.http_client import CrunchyrollHttpClient
 from crunchyroll.session_pool import ConcurrencyConfig
 
@@ -206,24 +211,30 @@ def process_url(client: CrunchyrollHttpClient, url: str, args: argparse.Namespac
     dl_dir = getattr(args, "output_dir", None)
     resume_flag = getattr(args, "resume", True)
     bitrate_mode = getattr(args, "bitrate_mode", None)
+    # None -> use "missing_audio_policy" from config.json (flag is not persisted)
+    missing_audio_policy = getattr(args, "missing_audio", None)
     if content_type == "episode":
         info = get_episode_info(client, content_id)
-        download_episode(
-            client,
-            content_id,
-            info,
-            audio_langs,
-            subs_langs,
-            video_quality,
-            audio_quality,
-            debug=args.debug_manifest,
-            concurrency_config=concurrency_cfg,
-            force_download=getattr(args, "force_download", False),
-            server_index=server_index,
-            download_dir=dl_dir,
-            resume=resume_flag,
-            bitrate_mode=bitrate_mode,
-        )
+        try:
+            download_episode(
+                client,
+                content_id,
+                info,
+                audio_langs,
+                subs_langs,
+                video_quality,
+                audio_quality,
+                debug=args.debug_manifest,
+                concurrency_config=concurrency_cfg,
+                force_download=getattr(args, "force_download", False),
+                server_index=server_index,
+                download_dir=dl_dir,
+                resume=resume_flag,
+                bitrate_mode=bitrate_mode,
+                missing_audio_policy=missing_audio_policy,
+            )
+        except AudioUnavailableError as exc:
+            print(f"Skipping: {exc}")
     elif content_type == "series":
         download_series(
             client,
@@ -240,6 +251,7 @@ def process_url(client: CrunchyrollHttpClient, url: str, args: argparse.Namespac
             download_dir=dl_dir,
             resume=resume_flag,
             bitrate_mode=bitrate_mode,
+            missing_audio_policy=missing_audio_policy,
         )
     elif content_type == "season":
         episodes = get_season_episodes(client, content_id, primary_audio, primary_subs)
@@ -257,6 +269,7 @@ def process_url(client: CrunchyrollHttpClient, url: str, args: argparse.Namespac
             download_dir=dl_dir,
             resume=resume_flag,
             bitrate_mode=bitrate_mode,
+            missing_audio_policy=missing_audio_policy,
         )
 
 
@@ -388,6 +401,16 @@ def main() -> None:
         "--force-download",
         action="store_true",
         help="Redownload completed episodes and atomically replace existing MKV files",
+    )
+    parser.add_argument(
+        "--missing-audio",
+        choices=["skip-if-none", "skip-if-any", "fallback"],
+        default=None,
+        help="What to do when the requested audio language is missing for an episode: "
+             "skip-if-none = skip only if none of the requested languages exists (default), "
+             "skip-if-any = skip if any requested language is missing, "
+             "fallback = download the first available audio (original behavior). "
+             "Overrides missing_audio_policy from config.json for this run only.",
     )
     parser.add_argument(
         "--resume",

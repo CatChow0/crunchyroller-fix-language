@@ -310,6 +310,17 @@
             <input type="hidden" id="audio-only-format" value="mka">
           </div>
 
+          <div class="field" style="margin-top: 16px;">
+            <label for="missing-audio-policy">when the selected dub is missing</label>
+            <div id="dd-missing-audio" class="select-dropdown"></div>
+            <input type="hidden" id="missing-audio-policy" value="skip_if_none">
+            <p class="hint">
+              <strong>skip if none available (default):</strong> skips the episode when none of the selected audio languages exists; partially available episodes are downloaded with the tracks found.<br>
+              <strong>skip if any missing:</strong> skips the episode as soon as one selected audio language is missing.<br>
+              <strong>fall back to original audio:</strong> downloads the first available track (usually Japanese) instead of skipping.
+            </p>
+          </div>
+
           <!-- Zombie Stream Purger -->
           <div class="cache-cleaner-box">
             <div class="cache-cleaner-info">

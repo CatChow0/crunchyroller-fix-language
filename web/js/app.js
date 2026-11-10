@@ -7,6 +7,7 @@ let ddAudio = null;
 let ddSubs = null;
 let ddBitrate = null;
 let ddAudioFormat = null;
+let ddMissingAudio = null;
 
 const VIDEO_OPTIONS = [
   { val: 'none', label: 'none (audio & subs only)' },
@@ -27,6 +28,16 @@ const AUDIO_QUAL_OPTIONS = [
   { val: '192k', label: '192k' },
   { val: '96k', label: '96k' }
 ];
+
+const MISSING_AUDIO_OPTIONS = [
+  { val: 'skip_if_none', label: 'skip if none available (default)' },
+  { val: 'skip_if_any', label: 'skip if any missing' },
+  { val: 'fallback', label: 'fall back to original audio' }
+];
+
+function getMissingAudioPolicy() {
+  return ddMissingAudio ? ddMissingAudio.value : (document.getElementById('missing-audio-policy')?.value || 'skip_if_none');
+}
 
 const BITRATE_OPTIONS = [
   { val: 'highest', label: 'highest (default)' },
@@ -326,6 +337,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   ddSubs = new CheckboxDropdown('dd-subs', 'sl', SUBS_OPTIONS, 'en-US', () => saveCfg(), true);
   ddBitrate = new CheckboxDropdown('dd-bitrate', 'bitrate-mode', BITRATE_OPTIONS, 'highest', () => saveCfg(), false);
   ddAudioFormat = new CheckboxDropdown('dd-audio-format', 'audio-only-format', AUDIO_FORMAT_OPTIONS, 'mka', () => saveCfg(), false);
+  ddMissingAudio = new CheckboxDropdown('dd-missing-audio', 'missing-audio-policy', MISSING_AUDIO_OPTIONS, 'skip_if_none', () => saveCfg(), false);
 
   const state = await api('/api/state');
   applyState(state);
@@ -476,6 +488,13 @@ function applyState(state) {
     const enableResume = document.getElementById('enable-resume');
     if (enableResume && state.config.enable_resume !== undefined) {
       enableResume.checked = Boolean(state.config.enable_resume);
+    }
+
+    if (ddMissingAudio && state.config.missing_audio_policy) {
+      ddMissingAudio.setValue(state.config.missing_audio_policy, false);
+    } else if (state.config.missing_audio_policy) {
+      const mapEl = document.getElementById('missing-audio-policy');
+      if (mapEl) mapEl.value = state.config.missing_audio_policy;
     }
 
     const enableLogging = document.getElementById('enable-logging');
@@ -671,6 +690,7 @@ async function saveCfg() {
     enable_logging: loggingVal,
     bitrate_mode: bitrateVal,
     audio_only_format: audioFormatVal,
+    missing_audio_policy: getMissingAudioPolicy(),
     enable_antiratelimit: enableAntiRateLimit,
     antiratelimit_delay: arDelayVal,
     antiratelimit_jitter: arJitterVal,
@@ -1186,8 +1206,9 @@ async function loadHistory() {
         topLine.className = 'history-top-line';
 
         const statusIco = document.createElement('span');
-        statusIco.className = `ep-ico ep-ico-${item.status === 'completed' ? 'done' : 'err'}`;
-        statusIco.textContent = item.status === 'completed' ? '✓' : (item.status === 'canceled' ? '✕' : '!');
+        statusIco.className = `ep-ico ep-ico-${item.status === 'completed' ? 'done' : (item.status === 'skipped' ? 'skip' : 'err')}`;
+        if (item.status === 'skipped' && item.error) statusIco.title = item.error;
+        statusIco.textContent = item.status === 'completed' ? '✓' : (item.status === 'canceled' ? '✕' : (item.status === 'skipped' ? '⊘' : '!'));
 
         const seriesTitle = getHistorySeriesTitle(item);
         const seriesEl = document.createElement('span');
@@ -2195,6 +2216,7 @@ async function startDl() {
     workers: workersVal,
     enable_resume: resumeVal,
     bitrate_mode: bitrateVal,
+    missing_audio_policy: getMissingAudioPolicy(),
   });
 
   if (!res.success) {
@@ -2694,6 +2716,9 @@ function updateEpIcon(epIco, status) {
   } else if (status === 'canceled') {
     epIco.className = 'ep-ico ep-ico-err';
     epIco.textContent = '✕';
+  } else if (status === 'skipped') {
+    epIco.className = 'ep-ico ep-ico-skip';
+    epIco.textContent = '⊘';
   } else if (status === 'failed') {
     epIco.className = 'ep-ico ep-ico-err';
     epIco.textContent = '!';
@@ -2757,6 +2782,12 @@ function updateEpRight(right, ep, epRow) {
     const statusPill = document.createElement('span');
     statusPill.className = 'task-ep-status-pill status-failed';
     statusPill.textContent = 'failed';
+    right.appendChild(statusPill);
+  } else if (ep.status === 'skipped') {
+    const statusPill = document.createElement('span');
+    statusPill.className = 'task-ep-status-pill status-skipped';
+    statusPill.textContent = 'skipped';
+    if (ep.error) statusPill.title = ep.error;
     right.appendChild(statusPill);
   }
 }
@@ -3609,6 +3640,7 @@ async function instantDownloadAnimeList(urls, singleTitle = '') {
       workers: workersVal,
       enable_resume: resumeVal,
       bitrate_mode: bitrateVal,
+      missing_audio_policy: getMissingAudioPolicy(),
     });
 
     if (!dlRes || !dlRes.success) {

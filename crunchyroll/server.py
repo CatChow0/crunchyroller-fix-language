@@ -66,7 +66,7 @@ from crunchyroll.api import (
     search_series,
 )
 from crunchyroll.auth import load_config, save_config
-from crunchyroll.downloader import download_episode
+from crunchyroll.downloader import download_episode, normalize_missing_audio_policy
 from crunchyroll.http_client import CrunchyrollHttpClient
 from crunchyroll.queue import DownloadQueue
 from crunchyroll.session_pool import ConcurrencyConfig
@@ -103,6 +103,7 @@ STATE = {
         "antiratelimit_jitter": max(2, min(15, int(initial_cfg.get("antiratelimit_jitter", 5)))),
         "antiratelimit_reduce_threads": bool(initial_cfg.get("antiratelimit_reduce_threads", True)),
         "audio_only_format": str(initial_cfg.get("audio_only_format", "mka")),
+        "missing_audio_policy": normalize_missing_audio_policy(initial_cfg.get("missing_audio_policy")),
     },
     "download": {
         "status":      "idle",
@@ -676,6 +677,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             STATE["config"][k] = bool(disk_cfg[k])
                         else:
                             STATE["config"][k] = disk_cfg[k]
+                if "missing_audio_policy" in disk_cfg:
+                    STATE["config"]["missing_audio_policy"] = normalize_missing_audio_policy(disk_cfg["missing_audio_policy"])
                 STATE["config"]["download_dir"] = disk_cfg.get("download_dir", DEFAULT_DOWNLOAD_DIR)
                 if disk_cfg.get("etp_rt"):
                     STATE["etp_rt"] = disk_cfg["etp_rt"]
@@ -977,7 +980,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif path == "/api/config":
             with LOCK:
                 disk_cfg = load_config()
-                for k in ("video_quality", "audio_quality", "audio_lang", "subs_lang", "force_download", "download_dir", "workers", "enable_hedging", "enable_resume", "enable_logging", "bitrate_mode", "enable_antiratelimit", "antiratelimit_delay", "antiratelimit_jitter", "antiratelimit_reduce_threads", "audio_only_format"):
+                for k in ("video_quality", "audio_quality", "audio_lang", "subs_lang", "force_download", "download_dir", "workers", "enable_hedging", "enable_resume", "enable_logging", "bitrate_mode", "enable_antiratelimit", "antiratelimit_delay", "antiratelimit_jitter", "antiratelimit_reduce_threads", "audio_only_format", "missing_audio_policy"):
                     if k in data:
                         val = data[k]
                         if k == "download_dir":
@@ -1003,6 +1006,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                                 val = 5
                         elif k in ("enable_hedging", "enable_resume", "force_download", "enable_logging", "enable_antiratelimit", "antiratelimit_reduce_threads"):
                             val = bool(val)
+                        elif k == "missing_audio_policy":
+                            val = normalize_missing_audio_policy(val)
                         elif k == "audio_only_format":
                             val = str(val or "mka").lower().strip()
                             if val not in ("mka", "mkv", "standalone"):
@@ -1266,6 +1271,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             enable_hedging = bool(data.get("enable_hedging", c.get("enable_hedging", False)))
             enable_resume = bool(data.get("enable_resume", c.get("enable_resume", True)))
             bitrate_mode = str(data.get("bitrate_mode") or c.get("bitrate_mode") or "highest").strip()
+            missing_audio_policy = normalize_missing_audio_policy(
+                data.get("missing_audio_policy", c.get("missing_audio_policy"))
+            )
 
             dl_dir = str(data.get("download_dir") or c.get("download_dir") or DEFAULT_DOWNLOAD_DIR).strip() or DEFAULT_DOWNLOAD_DIR
             default_task_title = str(data.get("task_title") or data.get("series_title") or "").strip()
@@ -1293,6 +1301,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     "enable_hedging": enable_hedging,
                     "enable_resume": enable_resume,
                     "bitrate_mode": bitrate_mode,
+                    "missing_audio_policy": missing_audio_policy,
                 }
                 enq = QUEUE.enqueue_batch(s_items, batch_opts, task_title=s_name)
                 all_enqueued.extend(enq)

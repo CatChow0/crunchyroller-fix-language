@@ -29,7 +29,7 @@ from crunchyroll.api import (
     parse_url_type,
 )
 from crunchyroll.auth import load_config
-from crunchyroll.downloader import download_episode
+from crunchyroll.downloader import AudioUnavailableError, download_episode
 from crunchyroll.http_client import CrunchyrollHttpClient
 from crunchyroll.types import EpisodeInfo, EpisodeMetadata, Season, SeasonEpisode
 
@@ -252,6 +252,7 @@ def _worker_loop(etp_rt: str):
     total_batch = 0
     success_count = 0
     fail_count = 0
+    skip_count = 0
     last_channel_id = None
 
     while True:
@@ -271,7 +272,7 @@ def _worker_loop(etp_rt: str):
                 if total_batch > 1 and last_channel_id:
                     notify_discord(
                         last_channel_id,
-                        f"🎉 **Batch Download Finished!** (`{success_count}` successful, `{fail_count}` failed)",
+                        f"🎉 **Batch Download Finished!** (`{success_count}` successful, `{fail_count}` failed, `{skip_count}` skipped)",
                     )
                 return
 
@@ -341,6 +342,16 @@ def _worker_loop(etp_rt: str):
                 raise RuntimeError(
                     f"Download finished but output file was not found or is 0 bytes: {output_file}"
                 )
+
+        except AudioUnavailableError as e:
+            skip_count += 1
+            with STATE.lock:
+                STATE.status = "skipped"
+            STATE._log(f"skipped: {label} - {e}")
+            notify_discord(
+                channel_id,
+                f"⊘ **Skipped:** `{label}` — {e}",
+            )
 
         except Exception as e:
             fail_count += 1

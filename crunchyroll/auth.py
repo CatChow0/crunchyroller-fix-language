@@ -19,6 +19,7 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "subs_lang": "en-US",
     "force_download": False,
     "enable_logging": True,
+    "missing_audio_policy": "skip_if_none",
 }
 
 
